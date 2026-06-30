@@ -11,12 +11,12 @@ import (
 
 type Queue struct {
 	mu       sync.Mutex
-	messages []string
+	messages []string // буфер для тех сообщений которые уже пришли
 	waiters  []chan string
 }
 
 var (
-	queues   = map[string]*Queue{}
+	queues   = map[string]*Queue{} // все очереди по имени
 	queuesMu sync.Mutex
 )
 
@@ -36,6 +36,7 @@ func main() {
 	flag.Parse()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// первый сегмент пути
 		name := r.URL.Path[1:]
 		q := getQueue(name)
 
@@ -46,19 +47,22 @@ func main() {
 				http.Error(w, "", http.StatusBadRequest)
 				return
 			}
+			// если кто-то ждёт — отдаём первому в очереди, иначе кладём в буфер
 			q.mu.Lock()
 			if len(q.waiters) > 0 {
 				ch := q.waiters[0]
 				q.waiters = q.waiters[1:]
 				q.mu.Unlock()
-				ch <- v
+				ch <- v // нет блокировки, размер буфера 1
 			} else {
 				q.messages = append(q.messages, v)
 				q.mu.Unlock()
 			}
 
 		case http.MethodGet:
+			//ждать сообщение N секунд
 			t, err := strconv.Atoi(r.URL.Query().Get("timeout"))
+
 			q.mu.Lock()
 			if len(q.messages) > 0 {
 				msg := q.messages[0]
@@ -72,6 +76,8 @@ func main() {
 				http.Error(w, "", http.StatusNotFound)
 				return
 			}
+
+			// встаём в очередь ожидающих под тем же мьютексом, что и PUT
 			ch := make(chan string, 1)
 			q.waiters = append(q.waiters, ch)
 			q.mu.Unlock()
@@ -80,6 +86,7 @@ func main() {
 			case msg := <-ch:
 				w.Write([]byte(msg))
 			case <-time.After(time.Duration(t) * time.Second):
+				// снимаем с ожидания
 				q.mu.Lock()
 				for i, w := range q.waiters {
 					if w == ch {
